@@ -1,60 +1,101 @@
-"""
-    It is one of the preprocessing components in which the image is rotated.
-"""
-
+import sys
 import os
 import cv2
-import sys
+import numpy as np
 
-sys.path.append(os.path.join(os.path.dirname(__file__), '../../../../'))
+# SDK Importlari
+try:
+    from sdks.novavision.src.media.image import Image
+    from sdks.novavision.src.base.capsule import Capsule
+    from sdks.novavision.src.helper.executor import Executor
+except ImportError:
+    # Lokal test icin bos siniflar
+    class Capsule:
+        def __init__(self, r, b): self.request, self.redis_db = r, b
 
-from sdks.novavision.src.media.image import Image
-from sdks.novavision.src.base.component import Component
-from sdks.novavision.src.helper.executor import Executor
-from components.Package.src.utils.response import build_response
-from components.Package.src.models.PackageModel import PackageModel
+
+    class Executor:
+        pass
 
 
-class Package(Component):
+    class Image:
+        pass
+
+# Modeli projeden cekiyoruz
+try:
+    from capsules.DemoPackage.src.models.PackageModel import PackageModel
+except ImportError:
+    # Lokal calisma icin alternatif yol
+    from src.models.PackageModel import PackageModel
+
+
+class Filter(Capsule):
     def __init__(self, request, bootstrap):
         super().__init__(request, bootstrap)
         self.request.model = PackageModel(**(self.request.data))
-        self.rotation_degree = self.request.get_param("Degree")
-        self.keep_side = self.request.get_param("KeepSide")
-        self.image = self.request.get_param("inputImage")
 
-    @staticmethod
-    def bootstrap(config: dict) -> dict:
-        return {}
+        # Giriş resmini al
+        self.image_input = self.request.get_param("inputImageOne")
 
-    def rotation(self, image):
-        if self.keep_side == True:
-            height, width = image.shape[:2]
-            image_center = (width / 2, height / 2)
-            rotation_arr = cv2.getRotationMatrix2D(image_center, self.rotation_degree, 1)
-            abs_cos = abs(rotation_arr[0, 0])
-            abs_sin = abs(rotation_arr[0, 1])
-            bound_w = int(height * abs_sin + width * abs_cos)
-            bound_h = int(height * abs_cos + width * abs_sin)
-            rotation_arr[0, 2] += bound_w / 2 - image_center[0]
-            rotation_arr[1, 2] += bound_h / 2 - image_center[1]
-            img_rotation = cv2.warpAffine(image, rotation_arr, (bound_w, bound_h))
+        # Mod seç
+        self.filter_mode_wrapper = self.request.get_param("configFilterMode")
+        self.mode_name = self.filter_mode_wrapper.value
 
-            return img_rotation
+        # Blur seçildiyse
+        if self.mode_name == "Blur":
+            self.kernel_size = self.request.get_param("blurKernelSize")
+            self.is_gaussian = self.request.get_param("blurIsGaussian")
 
-        elif self.keep_side == False:
-            height, width = image.shape[:2]
-            rotation_arr = cv2.getRotationMatrix2D((height / 2, width / 2), self.rotation_degree, 1)
-            img_rotation = cv2.warpAffine(image, rotation_arr, (height, width))
+        # Threshold seçildiyse
+        elif self.mode_name == "Threshold":
+            self.thresh_value = self.request.get_param("threshValue")
+            self.thresh_type = self.request.get_param("threshType")
 
-            return img_rotation
+    def process_image(self, img_array):
+        if img_array is None: return None
+
+        # Blur Islemi
+        if self.mode_name == "Blur":
+            try:
+                k_size = int(self.kernel_size)
+            except:
+                k_size = 5
+
+            if k_size % 2 == 0: k_size += 1
+
+            if self.is_gaussian:
+                processed = cv2.GaussianBlur(img_array, (k_size, k_size), 0)
+            else:
+                processed = cv2.blur(img_array, (k_size, k_size))
+            return processed
+
+        # Threshold Islemi
+        elif self.mode_name == "Threshold":
+            gray = cv2.cvtColor(img_array, cv2.COLOR_BGR2GRAY)
+            try:
+                t_val = float(self.thresh_value)
+            except:
+                t_val = 127.0
+
+            _, processed = cv2.threshold(gray, t_val, 255, cv2.THRESH_BINARY)
+            processed_color = cv2.cvtColor(processed, cv2.COLOR_GRAY2BGR)
+            return processed_color
+
+        return img_array
 
     def run(self):
-        img = Image.get_frame(img=self.image, redis_db=self.redis_db)
-        img.value = self.rotation(img.value)
-        self.image = Image.set_frame(img=img, package_uID=self.uID, redis_db=self.redis_db)
-        packageModel = build_response(context=self)
-        return packageModel
+        img_obj = Image.get_frame(img=self.image_input, redis_db=self.redis_db)
+        img_array = img_obj.value
+
+        result_array = self.process_image(img_array)
+        img_obj.value = result_array
+
+        response = {
+            "outputs": {
+                "outputImageOne": img_obj
+            }
+        }
+        return response
 
 
 if "__main__" == __name__:
